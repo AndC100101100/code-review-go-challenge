@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/md5" // CHALLENGE 1: replace this use with HMAC-SHA256
 	"crypto/subtle"
 	"encoding/hex"
@@ -22,7 +24,7 @@ import (
 // ===============================
 
 type App struct {
-	secret string // CHALLENGE 1: hardcoded secret; move to env + use HMAC
+	secret string // Loaded from env
 }
 
 var (
@@ -175,8 +177,12 @@ var (
 )
 
 func main() {
+	secret := os.Getenv("SECRET_KEY")
+	if secret == "" {
+		log.Fatal("SECRET_KEY environment variable must be set")
+	}
 	app := &App{
-		secret: "dev-secret-please-change", // CHALLENGE 1: replace with env like SECRET_KEY and HMAC
+		secret: secret,
 	}
 	ensureDocs()
 
@@ -214,9 +220,12 @@ func currentUser(r *http.Request) string {
 
 func setSession(w http.ResponseWriter, user string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:  "session",
-		Value: user, // CHALLENGE 1 (bonus): cookie is not HttpOnly/Secure/SameSite
-		Path:  "/",
+		Name:     "session",
+		Value:    user,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true, // Set to true for HTTPS; for local dev, may need to adjust
+		SameSite: http.SameSiteStrictMode,
 	})
 }
 
@@ -329,47 +338,32 @@ func (a *App) handleCtr(w http.ResponseWriter, r *http.Request) {
 	render(w, tplCounter, map[string]any{"Body": sb.String()})
 }
 
-// CHALLENGE 1: Insecure token (MD5 with static secret; timing-safe compare only)
-func (a *App) handleToken(w http.ResponseWriter, r *http.Request) {
-	u := currentUser(r)
-	if u == "" {
-		render(w, tplToken, map[string]any{"User": ""})
-		return
-	}
-	switch r.Method {
-	case "GET":
-		render(w, tplToken, map[string]any{"User": u})
-	case "POST":
-		tok := a.makeToken(u)
-		render(w, tplToken, map[string]any{"User": u, "Token": tok})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
+// CHALLENGE 1: Hardened token (HMAC-SHA256 with env secret)
 func (a *App) makeToken(username string) string {
-	// Token format: user:ts:md5(user + ":" + secret)
-	ts := time.Now().Unix()
-	h := md5.Sum([]byte(username + ":" + a.secret)) // TODO: use HMAC-SHA256 with env secret
-	return fmt.Sprintf("%s:%d:%s", username, ts, hex.EncodeToString(h[:]))
+    ts := time.Now().Unix()
+    mac := hmac.New(sha256.New, []byte(a.secret))
+    mac.Write([]byte(username + ":" + strconv.FormatInt(ts, 10)))
+    sig := hex.EncodeToString(mac.Sum(nil))
+    return fmt.Sprintf("%s:%d:%s", username, ts, sig)
 }
 
 func (a *App) verifyToken(token string) bool {
-	parts := strings.Split(token, ":")
-	if len(parts) != 3 {
-		return false
-	}
-	user := parts[0]
-	sig := parts[2]
-	h := md5.Sum([]byte(user + ":" + a.secret))
-	want := hex.EncodeToString(h[:])
-	// Timing-safe compare of hex strings (still MD5… to be replaced)
-	return subtle.ConstantTimeCompare([]byte(sig), []byte(want)) == 1
+    parts := strings.Split(token, ":")
+    if len(parts) != 3 {
+        return false
+    }
+    user := parts[0]
+    ts := parts[1]
+    sig := parts[2]
+    mac := hmac.New(sha256.New, []byte(a.secret))
+    mac.Write([]byte(user + ":" + ts))
+    want := hex.EncodeToString(mac.Sum(nil))
+    return subtle.ConstantTimeCompare([]byte(sig), []byte(want)) == 1
 }
 
 func (a *App) handleDebug(w http.ResponseWriter, r *http.Request) {
-	io.WriteString(w, "== Debug ==\n")
-	io.WriteString(w, fmt.Sprintf("users: %v\n", users))
-	io.WriteString(w, fmt.Sprintf("secret (dev): %s\n", a.secret))
-	io.WriteString(w, fmt.Sprintf("visits=%d stats=%v\n", visits, stats))
+    io.WriteString(w, "== Debug ==\n")
+    io.WriteString(w, fmt.Sprintf("users: %v\n", users))
+    // Secret is no longer printed
+    io.WriteString(w, fmt.Sprintf("visits=%d stats=%v\n", visits, stats))
 }
