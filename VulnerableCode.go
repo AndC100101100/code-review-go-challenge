@@ -139,8 +139,7 @@ var (
   <div class="card">
     <div class="mono muted">docs/{{ .Name }}</div>
     <hr>
-    <!-- CHALLENGE 2: Currently renders file content via |unsafe and allows arbitrary path -->
-    <div>{{ .Content | unsafe }}</div>
+    <pre>{{ .Content }}</pre>
   </div>
 </div>
 {{ end }}`))
@@ -284,22 +283,34 @@ func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 
 // CHALLENGE 2: Path handling + unsafe rendering
 func (a *App) handleDocs(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	if name == "" {
-		name = "sample.md"
-	}
-	// Vulnerable path join: allows "../" to escape docs/
-	path := "docs/" + name // TODO: fix with filepath.Clean + base check
-	b, err := os.ReadFile(path)
-	if err != nil {
-		http.Error(w, "read error: "+err.Error(), http.StatusNotFound)
-		return
-	}
-	// Renders file content directly as HTML (allows active markup)
-	render(w, tplDocs, map[string]any{
-		"Name":    name,
-		"Content": string(b), // TODO: render safely (no |unsafe)
-	})
+    name := r.URL.Query().Get("name")
+    if name == "" {
+        name = "sample.md"
+    }
+    // Only allow .md or .txt files
+    if !(strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".txt")) {
+        http.Error(w, "invalid file type", http.StatusBadRequest)
+        return
+    }
+    // Clean and join path, then check for traversal
+    cleanName := filepath.Clean(name)
+    path := filepath.Join("docs", cleanName)
+    absDocs, _ := filepath.Abs("docs")
+    absPath, _ := filepath.Abs(path)
+    if !strings.HasPrefix(absPath, absDocs) {
+        http.Error(w, "invalid path", http.StatusBadRequest)
+        return
+    }
+    b, err := os.ReadFile(path)
+    if err != nil {
+        http.Error(w, "read error: "+err.Error(), http.StatusNotFound)
+        return
+    }
+    // Render content as escaped text (preformatted)
+    render(w, tplDocs, map[string]any{
+        "Name":    name,
+        "Content": string(b),
+    })
 }
 
 // CHALLENGE 3: Data races (no locks around shared state)
