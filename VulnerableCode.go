@@ -15,6 +15,8 @@ import (
 	"path/filepath" // CHALLENGE 2: use this safely to prevent path traversal
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,8 +38,9 @@ var (
 	}
 
 	// CHALLENGE 3: data races — no locks/atomics on these shared vars
-	visits int                // total visits (racy)
-	stats  = map[string]int{} // per-user hits (racy)
+	visits int64              // total visits (atomic)
+	stats  = map[string]int{} // per-user hits (protected by statsMu)
+	statsMu sync.Mutex        // mutex for stats map
 
 	// Minimal templating with an UNSAFE passthrough used in /docs (CHALLENGE 2)
 	tplBase = template.Must(template.New("base").Funcs(template.FuncMap{
@@ -315,38 +318,43 @@ func (a *App) handleDocs(w http.ResponseWriter, r *http.Request) {
 
 // CHALLENGE 3: Data races (no locks around shared state)
 func (a *App) handleCtr(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-	if user == "" {
-		user = "guest"
-	}
-	nStr := r.URL.Query().Get("n")
-	if nStr == "" {
-		nStr = "10"
-	}
-	n, _ := strconv.Atoi(nStr)
-	if n < 1 {
-		n = 1
-	}
-	// Simulate burst increments without synchronization
-	done := make(chan struct{}, n)
-	for i := 0; i < n; i++ {
-		go func() {
-			visits++           // racy write
-			stats[user]++      // racy write
-			time.Sleep(1e6)    // tiny delay
-			done <- struct{}{}
-		}()
-	}
-	for i := 0; i < n; i++ {
-		<-done
-	}
+    user := r.URL.Query().Get("user")
+    if user == "" {
+        user = "guest"
+    }
+    nStr := r.URL.Query().Get("n")
+    if nStr == "" {
+        nStr = "10"
+    }
+    n, _ := strconv.Atoi(nStr)
+    if n < 1 {
+        n = 1
+    }
+    done := make(chan struct{}, n)
+    for i := 0; i < n; i++ {
+        go func() {
+            atomic.AddInt64(&visits, 1) // atomic increment
+            statsMu.Lock()
+            stats[user]++
+            statsMu.Unlock()
+            time.Sleep(1e6) // tiny delay
+            done <- struct{}{}
+        }()
+    }
+    for i := 0; i < n; i++ {
+        <-done
+    }
 
-	// Build response
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Burst: %d\n", n))
-	sb.WriteString(fmt.Sprintf("User: %s hits=%d\n", user, stats[user]))
-	sb.WriteString(fmt.Sprintf("Total visits=%d\n", visits))
-	render(w, tplCounter, map[string]any{"Body": sb.String()})
+    statsMu.Lock()
+    userHits := stats[user]
+    statsMu.Unlock()
+    totalVisits := atomic.LoadInt64(&visits)
+
+    var sb strings.Builder
+    sb.WriteString(fmt.Sprintf("Burst: %d\n", n))
+    sb.WriteString(fmt.Sprintf("User: %s hits=%d\n", user, userHits))
+    sb.WriteString(fmt.Sprintf("Total visits=%d\n", totalVisits))
+    render(w, tplCounter, map[string]any{"Body": sb.String()})
 }
 
 // CHALLENGE 1: Hardened token (HMAC-SHA256 with env secret)
